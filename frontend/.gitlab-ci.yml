@@ -1,0 +1,65 @@
+include:
+  - template: Security/SAST.gitlab-ci.yml
+
+stages:
+  - build
+  - notify
+  - test
+  - release
+  - deploy
+
+build-frontend-code-job: # задача с именем build-frontend-code-job
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.14.0-debug
+    entrypoint: [ "" ]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+  script:
+    - cd frontend
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}/frontend/"
+      --dockerfile "${CI_PROJECT_DIR}/frontend/dockerfile"
+      --build-arg VERSION=$VERSION
+      --destination "${CI_REGISTRY_IMAGE}/sausage-frontend:latest"
+
+slack-notification-frontend: #блок отвечающий за уведомление в slack
+  stage: notify
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' --data "{\"message\":\"Вышла новая версия frontend сосисочной — ${VERSION}. Скачать frontend можно по ссылке — https://nexus.praktikum-services.ru/service/rest/repository/browse/sausage-store-butkevich-mikhail-frontend/${VERSION}/.\"}" "$SLACK_URL"
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /.*send notification.*/
+  dependencies:
+    - build-frontend-code-job
+
+deploy:
+  stage: deploy
+  image: alpine:3.15.0
+  before_script:
+    - apk add openssh-client bash
+    #устанавливаем ssh-agent для удобства аутентификации по ssh
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    #сохраняем сгенеренный ранее приватный ключ для раннера
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 600 ~/.ssh
+    - mkdir -p /log/reports
+    - chmod 777 /log/*
+    - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    # для обхода проверки authorized_keys используем -o StrictHostKeychecking=no
+  script:
+    - ssh -o StrictHostKeychecking=no ${DEV_USER}@${DEV_HOST}
+      "export "VERSION=${VERSION}";
+       export "REGISTRY_IMAGE=$CI_REGISTRY_IMAGE";
+       export "GIT_user=$CI_REGISTRY_USER";
+       export "GIT_pass=$CI_REGISTRY_PASSWORD";
+       export "REGISTRY=$CI_REGISTRY";
+      /bin/bash -x -s " < ./frontend/frontend_deploy.sh
+
+  environment:
+    name: frontend/$CI_COMMIT_REF_SLUG
+    url: http://*/
